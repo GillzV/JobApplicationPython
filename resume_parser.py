@@ -1,235 +1,146 @@
 import re
+from typing import Dict, List, Any, Optional
 import PyPDF2
 from docx import Document
-import json
-from typing import Dict, List, Any
+import os
+
+SECTION_HEADERS = [
+    'profile', 'summary', 'objective',
+    'projects', 'project experience',
+    'technical skills', 'skills', 'technologies',
+    'work experience', 'experience', 'employment',
+    'education', 'academic background',
+    'awards', 'certifications', 'certification', 'honors',
+    'languages', 'language',
+    'contact', 'contact information', 'personal information'
+]
+
+SECTION_MAP = {
+    'profile': ['profile', 'summary', 'objective'],
+    'projects': ['projects', 'project experience'],
+    'skills': ['technical skills', 'skills', 'technologies'],
+    'work_experience': ['work experience', 'experience', 'employment'],
+    'education': ['education', 'academic background'],
+    'awards_certifications': ['awards', 'certifications', 'certification', 'honors'],
+    'languages': ['languages', 'language'],
+    'contact': ['contact', 'contact information', 'personal information']
+}
+
+CONTACT_PATTERNS = {
+    'email': r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',
+    'phone': r'(\+?\d{1,2}[\s-]?)?(\(?\d{3}\)?[\s-]?)?\d{3}[\s-]?\d{4}',
+}
+
+
+def extract_text(file_path: str) -> str:
+    ext = file_path.lower().split('.')[-1]
+    if ext == 'pdf':
+        with open(file_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            return '\n'.join([page.extract_text() or '' for page in reader.pages])
+    elif ext == 'docx':
+        doc = Document(file_path)
+        return '\n'.join([p.text for p in doc.paragraphs])
+    elif ext == 'txt':
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    else:
+        raise ValueError('Unsupported file type')
+
+
+def find_section_indices(lines: List[str]) -> List[tuple]:
+    indices = []
+    for i, line in enumerate(lines):
+        header = line.strip().lower().rstrip(':')
+        for canonical, variants in SECTION_MAP.items():
+            if any(header == v for v in variants):
+                indices.append((i, canonical))
+    return indices
+
+
+def group_sections(lines: List[str]) -> Dict[str, List[str]]:
+    indices = find_section_indices(lines)
+    if not indices:
+        return {}
+    indices.append((len(lines), None))  # Sentinel for last section
+    sections = {}
+    for idx in range(len(indices) - 1):
+        start, section = indices[idx]
+        end, _ = indices[idx + 1]
+        content = [l for l in lines[start + 1:end] if l.strip()]
+        if section:
+            sections[section] = content
+    return sections
+
+
+def extract_contact(lines: List[str]) -> Dict[str, str]:
+    contact = {'name': '', 'email': '', 'phone': ''}
+    # Name: first non-empty line
+    for line in lines:
+        if line.strip():
+            contact['name'] = line.strip()
+            break
+    # Email/Phone: anywhere in first 10 lines
+    for line in lines[:10]:
+        if not contact['email']:
+            m = re.search(CONTACT_PATTERNS['email'], line)
+            if m:
+                contact['email'] = m.group()
+        if not contact['phone']:
+            m = re.search(CONTACT_PATTERNS['phone'], line)
+            if m:
+                contact['phone'] = m.group()
+    return contact
+
+
+def parse_bullets(section_lines: List[str]) -> List[str]:
+    bullets = []
+    for line in section_lines:
+        if line.strip().startswith(('•', '-', '*')):
+            bullets.append(line.strip('•-* ').strip())
+        elif line.strip():
+            bullets.append(line.strip())
+    return bullets
+
+
+def parse_resume(file_path: str) -> Dict[str, Any]:
+    text = extract_text(file_path)
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    sections = group_sections(lines)
+    contact = extract_contact(lines)
+
+    parsed = {
+        'name': contact['name'],
+        'email': contact['email'],
+        'phone': contact['phone'],
+        'profile': [],
+        'projects': [],
+        'skills': [],
+        'work_experience': [],
+        'education': [],
+        'awards_certifications': [],
+        'languages': []
+    }
+
+    for key in parsed.keys():
+        if key in ['name', 'email', 'phone']:
+            continue
+        if key in sections:
+            if key in ['profile', 'skills', 'awards_certifications', 'languages']:
+                parsed[key] = parse_bullets(sections[key])
+            elif key == 'projects':
+                parsed[key] = parse_bullets(sections[key])
+            elif key == 'work_experience':
+                parsed[key] = parse_bullets(sections[key])
+            elif key == 'education':
+                parsed[key] = parse_bullets(sections[key])
+    return parsed
+
 
 class ResumeParser:
-    def __init__(self):
-        self.name_patterns = [
-            r'^[A-Z][a-z]+ [A-Z][a-z]+$',
-            r'^[A-Z][a-z]+ [A-Z]\. [A-Z][a-z]+$'
-        ]
-        
-        self.email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        self.phone_pattern = r'(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
-        
     def parse_resume(self, file_path: str) -> Dict[str, Any]:
-        """Parse resume from various file formats and extract structured information."""
-        file_extension = file_path.lower().split('.')[-1]
-        
-        if file_extension == 'pdf':
-            text = self._extract_text_from_pdf(file_path)
-        elif file_extension == 'docx':
-            text = self._extract_text_from_docx(file_path)
-        elif file_extension == 'txt':
-            text = self._extract_text_from_txt(file_path)
-        else:
-            raise ValueError(f"Unsupported file format: {file_extension}")
-        
-        return self._extract_information(text)
-    
-    def _extract_text_from_pdf(self, file_path: str) -> str:
-        """Extract text from PDF file."""
-        text = ""
-        try:
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
-        except Exception as e:
-            raise Exception(f"Error reading PDF: {str(e)}")
-        return text
-    
-    def _extract_text_from_docx(self, file_path: str) -> str:
-        """Extract text from DOCX file."""
-        try:
-            doc = Document(file_path)
-            text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
-        except Exception as e:
-            raise Exception(f"Error reading DOCX: {str(e)}")
-        return text
-    
-    def _extract_text_from_txt(self, file_path: str) -> str:
-        """Extract text from TXT file."""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                return file.read()
-        except Exception as e:
-            raise Exception(f"Error reading TXT: {str(e)}")
-    
-    def _extract_information(self, text: str) -> Dict[str, Any]:
-        """Extract structured information from resume text."""
-        lines = text.split('\n')
-        
-        # Initialize data structure
-        resume_data = {
-            'name': '',
-            'email': '',
-            'phone': '',
-            'address': '',
-            'summary': '',
-            'education': [],
-            'experience': [],
-            'skills': [],
-            'projects': [],
-            'certifications': []
-        }
-        
-        # Extract basic information
-        resume_data['name'] = self._extract_name(lines)
-        resume_data['email'] = self._extract_email(text)
-        resume_data['phone'] = self._extract_phone(text)
-        resume_data['address'] = self._extract_address(lines)
-        
-        # Extract sections
-        resume_data['summary'] = self._extract_summary(text)
-        resume_data['education'] = self._extract_education(text)
-        resume_data['experience'] = self._extract_experience(text)
-        resume_data['skills'] = self._extract_skills(text)
-        resume_data['projects'] = self._extract_projects(text)
-        resume_data['certifications'] = self._extract_certifications(text)
-        
-        return resume_data
-    
-    def _extract_name(self, lines: List[str]) -> str:
-        """Extract name from resume lines."""
-        for line in lines[:10]:  # Check first 10 lines
-            line = line.strip()
-            if line and len(line.split()) <= 4:  # Name should be 1-4 words
-                for pattern in self.name_patterns:
-                    if re.match(pattern, line):
-                        return line
-        return "Name not found"
-    
-    def _extract_email(self, text: str) -> str:
-        """Extract email address from text."""
-        emails = re.findall(self.email_pattern, text)
-        return emails[0] if emails else "Email not found"
-    
-    def _extract_phone(self, text: str) -> str:
-        """Extract phone number from text."""
-        phones = re.findall(self.phone_pattern, text)
-        return phones[0] if phones else "Phone not found"
-    
-    def _extract_address(self, lines: List[str]) -> str:
-        """Extract address from resume lines."""
-        address_keywords = ['street', 'avenue', 'road', 'drive', 'lane', 'city', 'state', 'zip']
-        
-        for line in lines[:20]:  # Check first 20 lines
-            line = line.strip().lower()
-            if any(keyword in line for keyword in address_keywords):
-                return line.title()
-        return "Address not found"
-    
-    def _extract_summary(self, text: str) -> str:
-        """Extract professional summary from text."""
-        summary_patterns = [
-            r'summary[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'objective[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'profile[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)'
-        ]
-        
-        for pattern in summary_patterns:
-            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                return match.group(1).strip()
-        return "Summary not found"
-    
-    def _extract_education(self, text: str) -> List[str]:
-        """Extract education information from text."""
-        education = []
-        education_patterns = [
-            r'education[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'degree[:\s]*(.*?)(?=\n|$)',
-            r'university[:\s]*(.*?)(?=\n|$)',
-            r'college[:\s]*(.*?)(?=\n|$)'
-        ]
-        
-        for pattern in education_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                if match.strip() and len(match.strip()) > 10:
-                    education.append(match.strip())
-        
-        return education if education else ["Education information not found"]
-    
-    def _extract_experience(self, text: str) -> List[str]:
-        """Extract work experience from text."""
-        experience = []
-        experience_patterns = [
-            r'experience[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'work history[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'employment[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)'
-        ]
-        
-        for pattern in experience_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                if match.strip() and len(match.strip()) > 20:
-                    experience.append(match.strip())
-        
-        return experience if experience else ["Experience information not found"]
-    
-    def _extract_skills(self, text: str) -> List[str]:
-        """Extract skills from text."""
-        skills = []
-        skills_patterns = [
-            r'skills[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'technical skills[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'programming languages[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)'
-        ]
-        
-        for pattern in skills_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                # Split by common delimiters
-                skill_list = re.split(r'[,;•\n]', match)
-                for skill in skill_list:
-                    skill = skill.strip()
-                    if skill and len(skill) > 2:
-                        skills.append(skill)
-        
-        return skills if skills else ["Skills information not found"]
-    
-    def _extract_projects(self, text: str) -> List[str]:
-        """Extract projects from text."""
-        projects = []
-        project_patterns = [
-            r'projects[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'portfolio[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)'
-        ]
-        
-        for pattern in project_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                if match.strip() and len(match.strip()) > 20:
-                    projects.append(match.strip())
-        
-        return projects if projects else ["Projects information not found"]
-    
-    def _extract_certifications(self, text: str) -> List[str]:
-        """Extract certifications from text."""
-        certifications = []
-        cert_patterns = [
-            r'certifications[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'certificates[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)',
-            r'licenses[:\s]*(.*?)(?=\n\n|\n[A-Z]|$)'
-        ]
-        
-        for pattern in cert_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                cert_list = re.split(r'[,;•\n]', match)
-                for cert in cert_list:
-                    cert = cert.strip()
-                    if cert and len(cert) > 5:
-                        certifications.append(cert)
-        
-        return certifications if certifications else ["Certifications information not found"]
-    
+        return parse_resume(file_path)
+
     def validate_resume_data(self, data: Dict[str, Any]) -> Dict[str, List[str]]:
         """Validate extracted resume data and return any issues found."""
         issues = {
