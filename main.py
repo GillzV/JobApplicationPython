@@ -390,7 +390,13 @@ class JobApplicationBot:
                 if isinstance(value, list):
                     display_text += f"{key}:\n"
                     for item in value:
-                        display_text += f"  • {item}\n"
+                        # Preserve original formatting - don't add bullet points if they're not there
+                        if item.startswith(('•', '-', '*', '→', '▶', '○', '▪', '▫')):
+                            # Item already has a bullet point, display as-is
+                            display_text += f"  {item}\n"
+                        else:
+                            # Item doesn't have a bullet point, display as plain text
+                            display_text += f"  {item}\n"
                 else:
                     display_text += f"{key}: {value}\n"
                 display_text += "\n"

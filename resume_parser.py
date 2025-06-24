@@ -96,10 +96,13 @@ def extract_contact(lines: List[str]) -> Dict[str, str]:
 def parse_bullets(section_lines: List[str]) -> List[str]:
     bullets = []
     for line in section_lines:
-        if line.strip().startswith(('•', '-', '*')):
-            bullets.append(line.strip('•-* ').strip())
-        elif line.strip():
-            bullets.append(line.strip())
+        line = line.strip()
+        if line.startswith(('•', '-', '*', '→', '▶', '○', '▪', '▫')):
+            # Only add bullet point for lines that actually start with bullet characters
+            bullets.append(line)
+        elif line:
+            # Regular text lines are added as-is without bullet points
+            bullets.append(line)
     return bullets
 
 
